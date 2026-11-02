@@ -3,7 +3,8 @@
   const ui = document.createElement('section');
   ui.id = 'browserLoginPanel';
   ui.style.cssText = 'position:fixed;right:15px;bottom:15px;z-index:9999;max-width:370px;width:calc(100% - 30px);background:#180b0d;color:#fff2ca;border:1px solid #d5a341;border-radius:14px;padding:16px;font:14px system-ui;box-shadow:0 6px 24px #0008';
-  if (new URLSearchParams(location.search).get('obs') === '1') return;
+  const q = new URLSearchParams(location.search);
+  if (q.get('obs') === '1' || q.get('view') === 'stage') return;
   ui.innerHTML = '<strong style="font-size:17px">🔐 Google × TikTok LIVE</strong><div id="authStatus" role="status" style="margin:10px 0">Đang kiểm tra đăng nhập...</div><div id="googleSignin" style="margin:10px 0"></div><div id="linkedLive" hidden><label for="authTikTok">Tài khoản TikTok đang LIVE</label><input id="authTikTok" placeholder="@username" autocomplete="off" style="width:100%;padding:10px;margin:8px 0;background:#28191c;color:white;border:1px solid #b98b42;border-radius:8px"><div style="display:flex;gap:6px;flex-wrap:wrap"><button id="authLiveStart" style="flex:1;background:#e8b953;color:#221300;padding:10px;border:0;border-radius:8px;cursor:pointer;font-weight:bold">▶ Mở LIVE & đồng bộ</button><button id="authLogout" style="padding:10px;border-radius:8px">Đăng xuất</button></div><small style="display:block;margin-top:8px">Google xác minh quản trị; TikTok LIVE đồng bộ theo @username, không tự tạo phiên đăng nhập TikTok hoặc bắt đầu phát sóng.</small></div>';
   document.body.appendChild(ui);
   const $ = id => document.getElementById(id);
