@@ -657,6 +657,7 @@
         const msg = JSON.parse(event.data);
         if (msg.method === 'temple.state') {
           updateUIState(msg.params);
+          syncChannelName(msg.params);
           if (msg.params?.liveExperience?.rainUntil) startHeartRain(msg.params.liveExperience.rainUntil);
         } else if (msg.method === 'temple.event') {
           if (msg.params?.state) updateUIState(msg.params.state);
@@ -800,6 +801,23 @@
       giftName: 'Đại Lễ Kim Long Chầu Phật',
       wish
     });
+  });
+
+  let didSetChannelName = false;
+  // Only prefill once: receiving state updates must not overwrite text while the host types.
+  function syncChannelName(st) {
+    if (didSetChannelName) return;
+    const v = st?.settings?.channelName;
+    const el = document.getElementById('inputChannelName');
+    if (v && el) { el.value = v; didSetChannelName = true; }
+  }
+  document.getElementById('btnSaveChannelName')?.addEventListener('click', () => {
+    const name = document.getElementById('inputChannelName')?.value.trim();
+    if (name) callRpc('temple.updateSettings', { channelName: name });
+  });
+  document.getElementById('btnReadNow')?.addEventListener('click', () => {
+    const text = document.getElementById('inputReadNow')?.value.trim();
+    if (text) callRpc('temple.speak', { text, broadcast: true });
   });
 
   document.getElementById('btnConnectTikTok')?.addEventListener('click', () => {
