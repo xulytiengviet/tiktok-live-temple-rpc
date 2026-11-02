@@ -6,11 +6,13 @@ const { spawn } = require('child_process');
 const cors = require('cors');
 const { WebSocketServer } = require('ws');
 const { TikTokLiveConnection, WebcastEvent, ControlEvent } = require('tiktok-live-connector');
+const { createBrowserAuth } = require('./browser-auth');
 
 const PORT = process.env.PORT || 3000;
 const DATA_DIR = path.join(__dirname, 'data');
 const TTS_CACHE_DIR = path.join(DATA_DIR, 'tts-cache');
 const STATE_FILE = path.join(DATA_DIR, 'merit-state.json');
+const browserAuth = createBrowserAuth({ dataDir: DATA_DIR });
 
 fs.mkdirSync(TTS_CACHE_DIR, { recursive: true });
 
@@ -1094,9 +1096,29 @@ async function handleRpcCall(method, params = {}) {
 // 8. EXPRESS + WEBSOCKET SERVER
 // ============================================================================
 const app = express();
-app.use(cors());
+// Same-origin browser API only. Do not allow arbitrary cross-origin admin RPC.
+app.disable('x-powered-by');
 app.use(express.json({ limit: '2mb' }));
 app.use('/tts-cache', express.static(TTS_CACHE_DIR, { maxAge: '7d' }));
+app.set('trust proxy', process.env.TRUST_PROXY === '1' ? 1 : false);
+app.get('/api/auth/session', (req, res) => { res.set('Cache-Control', 'no-store'); res.json(browserAuth.sessionInfo(req)); });
+app.post('/api/auth/google', (req, res) => browserAuth.login(req, res));
+app.post('/api/auth/logout', (req, res) => browserAuth.logout(req, res));
+app.post('/api/auth/link-tiktok', browserAuth.requireAdmin, (req, res) => {
+  try {
+    const username = browserAuth.saveLinked(browserAuth.userFromRequest(req), req.body?.username);
+    res.json({ ok: true, username });
+  } catch (err) { res.status(400).json({ ok: false, error: err.message }); }
+});
+app.post('/api/live/start', browserAuth.requireAdmin, async (req, res) => {
+  try {
+    const user = browserAuth.userFromRequest(req);
+    const username = browserAuth.cleanTikTokUsername(req.body?.username || browserAuth.getLinked(user));
+    if (user) browserAuth.saveLinked(user, username);
+    const live = await connectTikTokLive(username);
+    res.json({ ok: true, username, live, liveUrl: 'https://www.tiktok.com/@' + encodeURIComponent(username) + '/live' });
+  } catch (err) { res.status(400).json({ ok: false, error: err.message }); }
+});
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/admin', (_req, res) => {
@@ -1104,7 +1126,7 @@ app.get('/admin', (_req, res) => {
 });
 
 // HTTP JSON-RPC 2.0 Endpoint
-app.post('/rpc', async (req, res) => {
+app.post('/rpc', browserAuth.requireAdmin, async (req, res) => {
   const { jsonrpc, id, method, params } = req.body || {};
   if (!method) {
     return res.status(400).json({
@@ -1130,7 +1152,7 @@ app.post('/rpc', async (req, res) => {
 });
 
 // ZeroTTS HTTP Endpoint (Mai Chi default)
-app.all('/api/tts', async (req, res) => {
+app.all('/api/tts', browserAuth.requireAdmin, async (req, res) => {
   const text = (req.body?.text || req.query?.text || '').trim();
   const voice = (req.body?.voice || req.query?.voice || state.settings.ttsVoice || 'maichi').trim();
   if (!text) {
@@ -1160,7 +1182,9 @@ function broadcastNotification(method, params) {
   }
 }
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+  const wsCanWrite = browserAuth.allowAdmin(req) && (!req.headers.origin ||
+    (() => { try { return new URL(req.headers.origin).host === req.headers.host; } catch (_) { return false; } })());
   ws.send(
     JSON.stringify({
       jsonrpc: '2.0',
@@ -1177,6 +1201,10 @@ wss.on('connection', (ws) => {
       return;
     }
     if (!msg || !msg.method) return;
+    if (!wsCanWrite) {
+      if (msg.id !== undefined) ws.send(JSON.stringify({jsonrpc:'2.0',id:msg.id,error:{code:-32001,message:'Đăng nhập Google quản trị để gửi lệnh'}}));
+      return;
+    }
     try {
       const result = await handleRpcCall(msg.method, msg.params || {});
       if (msg.id !== undefined) {
@@ -1213,7 +1241,7 @@ server.listen(PORT, () => {
   console.log(`============================================================`);
 
   // Tự động kết nối tới @zenfacts_vn ngay khi khởi động server
-  const defaultChannel = process.env.TIKTOK_USER || state.tiktok?.username || 'zenfacts_vn';
+  const defaultChannel = process.env.TIKTOK_USER || '';
   if (defaultChannel) {
     connectTikTokLive(defaultChannel).catch((err) => {
       console.warn(`[Auto-Connect @${defaultChannel}] Chưa kết nối được ngay:`, err.message);
