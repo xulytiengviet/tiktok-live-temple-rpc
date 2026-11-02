@@ -1120,3 +1120,41 @@ body.obs-mode .stage-wrapper {
   border-left: 3px solid var(--gold-main);
   color: #f3e5cf;
 }
+
+
+/* Low-overhead visual LIVE effects. Disabled automatically for reduced motion. */
+#liveHeartRain {
+  position:absolute;inset:0;overflow:hidden;z-index:130;
+  pointer-events:none;display:none;contain:layout paint;
+}
+#liveHeartRain.active {display:block}
+#liveHeartRain span {
+  position:absolute;top:-8%;left:var(--offset);
+  font-size:clamp(24px,3vw,48px);opacity:0;
+  will-change:transform;
+  animation:temple-lotus-fall 8s linear infinite;
+  animation-delay:calc(var(--i) * -.28s);
+}
+@keyframes temple-lotus-fall {
+  0% {transform:translate3d(0,0,0) rotate(0);opacity:0}
+  9% {opacity:.88}
+  90% {opacity:.78}
+  100% {transform:translate3d(80px,2080px,0) rotate(190deg);opacity:0}
+}
+.stage-9x16.live-gift-focus .central-worshipper {
+  filter:drop-shadow(0 0 20px #ffde79);
+  transition:filter .35s ease;
+}
+.stage-9x16.live-gift-focus .central-sprite-stack {
+  animation:temple-gift-spotlight 1s ease-in-out alternate 5;
+}
+@keyframes temple-gift-spotlight {
+  0% {filter:brightness(1)}
+  100% {filter:brightness(1.23) drop-shadow(0 0 10px #ffd879)}
+}
+.hud-lb-list {max-height:260px;overflow:hidden}
+.hud-lb-list .leader-item {min-height:21px}
+.dock-input, .dock-btn {max-width:100%}
+@media (prefers-reduced-motion:reduce) {
+  #liveHeartRain span,.stage-9x16.live-gift-focus .central-sprite-stack {animation:none!important}
+}
