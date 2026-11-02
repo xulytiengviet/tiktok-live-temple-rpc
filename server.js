@@ -7,6 +7,7 @@ const cors = require('cors');
 const { WebSocketServer } = require('ws');
 const { TikTokLiveConnection, WebcastEvent, ControlEvent } = require('tiktok-live-connector');
 const { createBrowserAuth } = require('./browser-auth');
+const { LiveOps, blessingFromComment } = require('./live-ops');
 
 const PORT = process.env.PORT || 3000;
 const DATA_DIR = path.join(__dirname, 'data');
@@ -117,13 +118,16 @@ class ZeroTTSManager {
     this.inflight = new Map();
     this.reqCounter = 0;
     this.buffer = '';
-    this.startWorker();
+    if (process.env.ENABLE_ZEROTTS === '1') this.startWorker();
+    else this.status = 'browser-fallback';
   }
 
   resolvePythonBin() {
+    const venvWin = path.join(__dirname, '.venv', 'Scripts', 'python.exe');
     const venvPy = path.join(__dirname, '.venv', 'bin', 'python');
+    if (fs.existsSync(venvWin)) return venvWin;
     if (fs.existsSync(venvPy)) return venvPy;
-    return 'python3';
+    return process.platform === 'win32' ? 'python' : 'python3';
   }
 
   startWorker() {
@@ -137,6 +141,11 @@ class ZeroTTSManager {
       stdio: ['pipe', 'pipe', 'pipe']
     });
 
+    this.proc.on('error', (err) => {
+      this.ready = false;
+      this.status = 'browser-fallback';
+      console.warn('[ZeroTTS] Worker tùy chọn không khả dụng:', err.message);
+    });
     this.proc.stdout.on('data', (chunk) => {
       this.buffer += chunk.toString('utf8');
       let lines = this.buffer.split('\n');
@@ -155,7 +164,7 @@ class ZeroTTSManager {
     this.proc.on('exit', (code) => {
       console.warn(`[ZeroTTS] Worker thoát với mã ${code}`);
       this.ready = false;
-      this.status = 'stopped';
+      this.status = 'browser-fallback';
       for (const [, item] of this.pending) {
         clearTimeout(item.timer);
         item.resolve({ ok: false, error: 'ZeroTTS worker exited' });
@@ -260,6 +269,7 @@ const DEFAULT_STATE = {
   devotees: {},
   recentEvents: [],
   settings: {
+    channelName: 'Chốn An Nhiên',
     ttsEnabled: true,
     ttsVoice: 'maichi',
     bgMusicEnabled: true,
@@ -298,6 +308,7 @@ function loadState() {
 }
 
 let state = loadState();
+const liveOps = new LiveOps();
 
 let saveTimer = null;
 function saveState() {
@@ -315,9 +326,10 @@ function saveState() {
       devotees: state.devotees,
       settings: state.settings
     };
-    fs.promises.writeFile(STATE_FILE, JSON.stringify(toSave, null, 2), 'utf8').catch((e) => {
-      console.error('[State] Lỗi lưu file:', e.message);
-    });
+    const tmp = STATE_FILE + '.tmp';
+    fs.promises.writeFile(tmp, JSON.stringify(toSave, null, 2), 'utf8')
+      .then(() => fs.promises.rename(tmp, STATE_FILE))
+      .catch((e) => console.error('[State] Lỗi ghi dữ liệu:', e.message));
   }, 1200);
 }
 
@@ -409,6 +421,9 @@ function recordDevotee(user, uniqueId, avatar, meritDelta, incenseDelta = 0, gif
   const dev = state.devotees[key];
   dev.name = displayName;
   if (avatar) dev.avatar = avatar;
+  if (Object.keys(state.devotees).length > 2000) {
+    delete state.devotees[Object.keys(state.devotees)[0]];
+  }
   dev.merit += meritDelta;
   dev.incense += incenseDelta;
   dev.gifts += giftDelta;
@@ -445,6 +460,9 @@ function getPublicState() {
     offerings: state.offerings,
     leaderboard: getLeaderboard(24),
     recentEvents: state.recentEvents.slice(0, 15),
+    liveExperience: liveOps.getSummary(),
+    liveGuests: liveOps.getGuests(),
+    topSincere: liveOps.getTop(10),
     settings: state.settings,
     tiktok: state.tiktok,
     tts: zeroTts ? zeroTts.getStatus() : { ready: false, status: 'init', voice: 'maichi' }
@@ -598,12 +616,12 @@ const Rituals = {
     state.totalIncense += 3;
     state.activeIncenseSticks = Math.min(36, state.activeIncenseSticks + 3);
 
-    const wish = params.wish || `Dâng cúng ${giftName} lên Tam Bảo`;
+    const wish = params.wish || 'Gửi lời chúc tốt đẹp đến mọi người';
     const devotee = recordDevotee(user, uniqueId, avatar, merit, 3, 1, wish);
 
     const ttsText = params.readTts === false
       ? ''
-      : `Công đức vô lượng! Cảm tạ thí chủ ${devotee.name} đã phát tâm dâng cúng ${giftName}, tích thêm ${merit} điểm công đức. Nguyện cầu chư Phật gia hộ cho thí chủ vạn sự cát tường như ý.`;
+      : `${state.settings.channelName || 'Chốn An Nhiên'} cảm ơn bạn ${devotee.name} đã gửi ${giftName}. Chúc bạn bình an, vui vẻ và nhiều sức khỏe.`;
 
     const event = pushEventLog({
       type: giftType === 'dragon' ? 'grandCeremony' : 'offerGift',
@@ -668,7 +686,8 @@ const Rituals = {
   updateSettings(params = {}) {
     state.settings = {
       ...state.settings,
-      ...params
+      ...params,
+      ...(typeof params.channelName === 'string' ? { channelName: sanitizeUserName(params.channelName).slice(0, 40) } : {})
     };
     if (typeof params.autoSim === 'boolean') {
       configureAutoSim(params.autoSim);
@@ -699,6 +718,57 @@ const Rituals = {
 // 5. TIKTOK LIVE CONNECTOR & COMMENT PARSER
 // ============================================================================
 let tiktokConn = null;
+let reconnectTimer = null;
+let liveGeneration = 0;
+let retryCount = 0;
+let stopLive = true;
+const offeringCooldowns = new Map();
+let pendingVisualLikes = 0;
+let pendingVisualLiker = null;
+let visualLikesTimer = null;
+const pendingGreetings = [];
+let guestUpdateTimer = null;
+let lastIdleGreeting = 0;
+
+function refreshGuestsSoon() {
+  if (guestUpdateTimer) return;
+  guestUpdateTimer = setTimeout(() => {
+    guestUpdateTimer = null;
+    broadcastNotification('temple.state', getPublicState());
+  }, 650);
+}
+
+function scheduleLiveReconnect(username) {
+  if (stopLive || reconnectTimer) return;
+  const delay = Math.min(60000, 4000 * (2 ** Math.min(retryCount++, 5))) + Math.floor(Math.random() * 1200);
+  state.tiktok.connecting = true;
+  broadcastNotification('temple.state', getPublicState());
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    if (stopLive) return;
+    connectTikTokLive(username, { automatic: true }).catch(err => {
+      console.warn('[TikTok LIVE] Thử kết nối lại thất bại:', err.message);
+    });
+  }, delay);
+}
+
+setInterval(() => {
+  if (pendingGreetings.length) {
+    const names = pendingGreetings.splice(0, 3);
+    broadcastNotification('temple.speech', {
+      text: `${state.settings.channelName || 'Chốn An Nhiên'} xin chào ${names.join(', ')} vừa ghé thăm. Chúc mọi người an nhiên.`,
+      priority: -10
+    });
+  }
+  const now = Date.now();
+  if (state.tiktok.connected && now - liveOps.lastActivity >= 90000 && now - lastIdleGreeting >= 90000) {
+    lastIdleGreeting = now;
+    broadcastNotification('temple.speech', {
+      text: `Cảm ơn mọi người đã ghé ${state.settings.channelName || 'Chốn An Nhiên'}. Chúc mọi người một ngày bình an. Nếu thấy thư giãn, hãy chia sẻ với bạn bè nhé.`,
+      priority: -20
+    });
+  }
+}, 6000).unref?.();
 
 const commentCooldownMap = new Map();
 
@@ -730,6 +800,16 @@ function parseViewerComment(commentText, user, uniqueId, avatar) {
 
   const cleanUser = sanitizeUserName(user);
   const lower = cleanWish.toLowerCase();
+  liveOps.addScore({ user: cleanUser, uniqueId, avatar, comments: 1 });
+  refreshGuestsSoon();
+  if (/^a\s*di\s*da\s*phat[.!]?$/i.test(lower) || /^adidaphat[.!]?$/i.test(lower)) {
+    const key = uniqueId || cleanUser;
+    const prev = offeringCooldowns.get(key) || 0;
+    if (now - prev < 60000) return null;
+    offeringCooldowns.set(key, now);
+    while (offeringCooldowns.size > 1000) offeringCooldowns.delete(offeringCooldowns.keys().next().value);
+    return Rituals.burnIncense({ user: cleanUser, uniqueId, avatar, count: 3, readTts: false, wish: 'Bình an và thư thái' });
+  }
 
   // 1. Xin xăm / Gieo quẻ
   if (
@@ -788,7 +868,11 @@ function parseViewerComment(commentText, user, uniqueId, avatar) {
     return Rituals.sendPrayer({ user: cleanUser, uniqueId, avatar, wish: cleanWish });
   }
 
-  return Rituals.burnIncense({ user: cleanUser, uniqueId, avatar, count: 1, wish: cleanWish });
+  broadcastNotification('temple.speech', {
+    text: `${state.settings.channelName || 'Chốn An Nhiên'} chào bạn ${cleanUser}. ${blessingFromComment(cleanWish)}`,
+    priority: 0
+  });
+  return null;
 }
 
 const giftComboTracker = new Map();
@@ -832,11 +916,20 @@ function extractUserFromEvent(data) {
   return { user, uniqueId, avatar };
 }
 
-async function connectTikTokLive(usernameOrUrl) {
+async function connectTikTokLive(usernameOrUrl, { automatic = false } = {}) {
   const cleanUser = await resolveTikTokUsername(usernameOrUrl);
   if (!cleanUser) {
     throw new Error('Không tìm thấy @username hợp lệ từ dữ liệu nhập vào');
   }
+  if (!automatic) retryCount = 0;
+  stopLive = false;
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+  const generation = ++liveGeneration;
+  giftComboTracker.clear();
+  pendingVisualLikes = 0;
+  clearTimeout(visualLikesTimer);
+  visualLikesTimer = null;
 
   if (tiktokConn) {
     try {
@@ -855,35 +948,54 @@ async function connectTikTokLive(usernameOrUrl) {
   };
   broadcastNotification('temple.state', getPublicState());
 
-  tiktokConn = new TikTokLiveConnection(cleanUser, {
+  const conn = new TikTokLiveConnection(cleanUser, {
     processInitialData: true,
     fetchRoomInfoOnConnect: false,
     enableExtendedGiftInfo: false
   });
 
-  tiktokConn.on(ControlEvent.CONNECTED, (roomState) => {
+  tiktokConn = conn;
+  const isActive = () => !stopLive && generation === liveGeneration && tiktokConn === conn;
+  conn.on(ControlEvent.CONNECTED, (roomState) => {
+    if (!isActive()) return;
+    retryCount = 0;
     state.tiktok.connected = true;
     state.tiktok.connecting = false;
-    state.tiktok.roomId = roomState?.roomId || tiktokConn?.roomId || null;
+    state.tiktok.roomId = roomState?.roomId || conn?.roomId || null;
     state.tiktok.lastError = null;
     console.log(`[TikTok Live] Đã kết nối phòng @${cleanUser} (roomId: ${state.tiktok.roomId})`);
     broadcastNotification('temple.state', getPublicState());
   });
 
-  tiktokConn.on(ControlEvent.DISCONNECTED, () => {
+  conn.on(ControlEvent.DISCONNECTED, () => {
+    if (!isActive()) return;
     state.tiktok.connected = false;
     state.tiktok.connecting = false;
     console.log(`[TikTok Live] Đã ngắt kết nối @${cleanUser}`);
     broadcastNotification('temple.state', getPublicState());
+    scheduleLiveReconnect(cleanUser);
   });
 
-  tiktokConn.on(ControlEvent.ERROR, (err) => {
+  conn.on(ControlEvent.ERROR, (err) => {
+    if (!isActive()) return;
     state.tiktok.lastError = err?.message || String(err);
     console.warn('[TikTok Live Warning]', state.tiktok.lastError);
     broadcastNotification('temple.state', getPublicState());
+    if (!state.tiktok.connected) scheduleLiveReconnect(cleanUser);
   });
 
-  tiktokConn.on(WebcastEvent.ROOM_USER, (data) => {
+  if (WebcastEvent.STREAM_END) conn.on(WebcastEvent.STREAM_END, () => {
+    if (!isActive()) return;
+    stopLive = true;
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+    state.tiktok.connected = false;
+    state.tiktok.connecting = false;
+    state.tiktok.lastError = 'Buổi LIVE đã kết thúc; không tự kết nối lại';
+    broadcastNotification('temple.state', getPublicState());
+  });
+
+  conn.on(WebcastEvent.ROOM_USER, (data) => {
     const viewerCount = Number(data?.total ?? data?.viewerCount ?? 0);
     if (viewerCount > 0) {
       state.tiktok.viewerCount = viewerCount;
@@ -891,23 +1003,39 @@ async function connectTikTokLive(usernameOrUrl) {
     }
   });
 
-  tiktokConn.on(WebcastEvent.MEMBER, (data) => {
+  conn.on(WebcastEvent.MEMBER, (data) => {
+    if (!isActive()) return;
     const { user, uniqueId, avatar } = extractUserFromEvent(data);
-    recordDevotee(user, uniqueId, avatar, 1, 0, 0, 'Đã vào Chánh Điện lễ Phật');
-    broadcastNotification('temple.state', getPublicState());
+    const clean = sanitizeUserName(user);
+    if (liveOps.join({ user: clean, uniqueId, avatar }) && pendingGreetings.length < 500) pendingGreetings.push(clean);
+    refreshGuestsSoon();
   });
 
-  tiktokConn.on(WebcastEvent.CHAT, (data) => {
+  conn.on(WebcastEvent.CHAT, (data) => {
+    if (!isActive()) return;
     const { user, uniqueId, avatar } = extractUserFromEvent(data);
     const commentText = data?.content || data?.comment || '';
-    console.log(`[TikTok Chat] ${user}: ${commentText}`);
+    liveOps.join({ user: sanitizeUserName(user), uniqueId, avatar });
     parseViewerComment(commentText, user, uniqueId, avatar);
   });
 
-  tiktokConn.on(WebcastEvent.LIKE, (data) => {
+  conn.on(WebcastEvent.LIKE, (data) => {
+    if (!isActive()) return;
     const { user, uniqueId, avatar } = extractUserFromEvent(data);
-    const likeCount = Math.min(15, Math.max(1, Number(data?.count ?? data?.likeCount ?? 1)));
-    Rituals.strikeWoodenFish({ user, uniqueId, avatar, count: likeCount });
+    const likeCount = Math.min(2000, Math.max(1, Math.floor(Number(data?.count ?? data?.likeCount ?? 1)) || 1));
+    const newRain = liveOps.addLikes(likeCount);
+    pendingVisualLikes = Math.min(50, pendingVisualLikes + likeCount);
+    pendingVisualLiker = { user, uniqueId, avatar };
+    // Burst coalescing: all hearts are counted, but render at most one scene event / 400ms.
+    if (!visualLikesTimer) visualLikesTimer = setTimeout(() => {
+      visualLikesTimer = null;
+      if (!stopLive && pendingVisualLiker && pendingVisualLikes > 0) {
+        Rituals.strikeWoodenFish({ ...pendingVisualLiker, count: pendingVisualLikes });
+      }
+      pendingVisualLikes = 0;
+      pendingVisualLiker = null;
+    }, 400);
+    if (newRain) broadcastNotification('temple.heartRain', { until: liveOps.rainUntil, durationMs: 60000 });
   });
 
   const handleSocialEvent = (data) => {
@@ -921,9 +1049,10 @@ async function connectTikTokLive(usernameOrUrl) {
       readTts: false
     });
   };
-  tiktokConn.on(WebcastEvent.FOLLOW, handleSocialEvent);
-  tiktokConn.on(WebcastEvent.SHARE, handleSocialEvent);
-  tiktokConn.on(WebcastEvent.SOCIAL, (data) => {
+  conn.on(WebcastEvent.FOLLOW, handleSocialEvent);
+  conn.on(WebcastEvent.SHARE, handleSocialEvent);
+  conn.on(WebcastEvent.SOCIAL, (data) => {
+    if (!isActive()) return;
     const action = String(data?.action || '');
     const disp = String(data?.common?.displayText?.displayType || data?.displayType || '').toLowerCase();
     if (action === '1' || action === '3' || disp.includes('follow') || disp.includes('share')) {
@@ -931,7 +1060,8 @@ async function connectTikTokLive(usernameOrUrl) {
     }
   });
 
-  tiktokConn.on(WebcastEvent.GIFT, (data) => {
+  conn.on(WebcastEvent.GIFT, (data) => {
+    if (!isActive()) return;
     const { user, uniqueId, avatar } = extractUserFromEvent(data);
     const giftObj = data?.gift || data?.giftDetails || {};
     const giftId = String(data?.giftId || giftObj?.id || 'rose');
@@ -943,15 +1073,18 @@ async function connectTikTokLive(usernameOrUrl) {
       giftComboTracker.delete(groupId);
       return;
     }
-    const deltaCount = Math.max(1, repeatCount - prevCount);
-    giftComboTracker.set(groupId, repeatCount);
+    const deltaCount = Math.max(0, repeatCount - prevCount);
+    if (deltaCount === 0) return;
+    if (data?.repeatEnd) giftComboTracker.delete(groupId);
+    else giftComboTracker.set(groupId, repeatCount);
     if (giftComboTracker.size > 500) {
       const firstKey = giftComboTracker.keys().next().value;
       giftComboTracker.delete(firstKey);
     }
 
     const diamondCount = Math.max(1, Number(giftObj?.diamondCount || data?.diamondCount || 1));
-    const totalCoins = diamondCount * deltaCount;
+    const totalCoins = Math.min(100000, diamondCount * deltaCount);
+    liveOps.addScore({ user: sanitizeUserName(user), uniqueId, avatar, giftCoins: totalCoins });
     const rawGiftName = giftObj?.name || data?.giftName || giftObj?.describe || 'Hoa Hồng Tâm Thành';
     const displayGiftName = deltaCount > 1 ? `${deltaCount}x ${rawGiftName}` : rawGiftName;
 
@@ -963,27 +1096,39 @@ async function connectTikTokLive(usernameOrUrl) {
       avatar,
       coins: totalCoins,
       giftName: displayGiftName,
-      wish: `Thành tâm dâng ${displayGiftName} kính lễ Đức Phật A Di Đà`
+      wish: 'Gửi lời chúc bình an và vui vẻ'
     });
   });
 
   try {
-    const roomState = await tiktokConn.connect();
+    const roomState = await conn.connect();
+    if (!isActive()) return state.tiktok;
     state.tiktok.connected = true;
     state.tiktok.connecting = false;
     state.tiktok.roomId = roomState?.roomId || tiktokConn?.roomId || null;
     broadcastNotification('temple.state', getPublicState());
     return state.tiktok;
   } catch (err) {
+    if (!isActive()) throw err;
     state.tiktok.connected = false;
     state.tiktok.connecting = false;
     state.tiktok.lastError = err?.message || 'Không thể kết nối phòng Live (kiểm tra tài khoản đang phát Live chưa)';
+    scheduleLiveReconnect(cleanUser);
     broadcastNotification('temple.state', getPublicState());
     throw new Error(state.tiktok.lastError);
   }
 }
 
 function disconnectTikTokLive() {
+  stopLive = true;
+  liveGeneration++;
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+  retryCount = 0;
+  giftComboTracker.clear();
+  clearTimeout(visualLikesTimer);
+  visualLikesTimer = null;
+  pendingVisualLikes = 0;
   if (tiktokConn) {
     try {
       tiktokConn.disconnect();
@@ -1066,15 +1211,10 @@ async function handleRpcCall(method, params = {}) {
     case 'temple.comment':
       return parseViewerComment(params.comment, params.user, params.uniqueId, params.avatar);
     case 'temple.speak': {
-      const res = await zeroTts.synthesize(params.text, params.voice || 'maichi');
-      if (res.ok && params.broadcast !== false) {
-        broadcastNotification('tts.play', {
-          text: params.text,
-          voice: res.voice,
-          url: res.url
-        });
-      }
-      return res;
+      const phrase = sanitizeWishText(params.text).slice(0, 180);
+      if (!phrase) throw new Error('Thiếu nội dung hợp lệ để đọc');
+      if (params.broadcast !== false) broadcastNotification('temple.speech', { text: phrase, priority: 80 });
+      return { ok: true, queued: true, engine: zeroTts.ready ? 'ZeroTTS' : 'Browser speech fallback' };
     }
     case 'temple.ttsStatus':
       return zeroTts.getStatus();
@@ -1165,6 +1305,7 @@ app.all('/api/tts', browserAuth.requireAdmin, async (req, res) => {
 app.get('/api/state', (_req, res) => {
   res.json(getPublicState());
 });
+app.get('/healthz', (_req, res) => res.json({ ok: true, liveConnected: state.tiktok.connected, tts: zeroTts.status, uptimeSeconds: Math.floor(process.uptime()) }));
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
@@ -1176,7 +1317,7 @@ function broadcastNotification(method, params) {
     params
   });
   for (const client of wss.clients) {
-    if (client.readyState === 1) {
+    if (client.readyState === 1 && client.bufferedAmount < 1024 * 1024) {
       client.send(payload);
     }
   }
@@ -1231,8 +1372,18 @@ wss.on('connection', (ws, req) => {
 });
 
 const zeroTts = new ZeroTTSManager();
+setInterval(() => {
+  for (const ws of wss.clients) {
+    if (ws.isAlive === false) { ws.terminate(); continue; }
+    ws.isAlive = false;
+    ws.ping();
+  }
+}, 30000).unref?.();
+wss.on('connection', ws => { ws.isAlive = true; ws.on('pong', () => { ws.isAlive = true; }); });
 
-server.listen(PORT, () => {
+const BIND_HOST = process.env.HOST || (process.env.LOCAL_DEV_UNSAFE === '1' ? '127.0.0.1' : '0.0.0.0');
+server.on('error', err => { console.error('[Server]', err.message); process.exit(1); });
+server.listen(PORT, BIND_HOST, () => {
   console.log(`============================================================`);
   console.log(`🪷 CHÙA ONLINE TIKTOK LIVE RPC ĐÃ KHỞI ĐỘNG`);
   console.log(`📺 Màn hình Live (9:16 OBS): http://localhost:${PORT}`);

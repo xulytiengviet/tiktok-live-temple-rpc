@@ -7,9 +7,8 @@
  */
 (function () {
   const params = new URLSearchParams(window.location.search);
-  if (params.get('obs') === '1') {
-    document.body.classList.add('obs-mode');
-  }
+  const stageOnly = params.get('obs') === '1' || params.get('view') === 'stage';
+  if (stageOnly) document.body.classList.add('obs-mode');
 
   // 1. Tự động co giãn khung 1080x1920 vừa khít Stage Wrapper (9:16)
   const stageWrapper = document.getElementById('stageWrapper');
@@ -28,6 +27,12 @@
   const canvas = document.getElementById('templeCanvas');
   const particles = new window.TempleParticleEngine(canvas);
   const audio = new window.TempleAudioEngine();
+  if (!stageOnly) {
+    // Dashboard must NEVER speak: only the LIVE Studio stage may emit sound.
+    audio.ttsEnabled = false;
+    audio.sfxEnabled = false;
+    audio.bgMusicEnabled = false;
+  }
 
   function unlockAudioOnce() {
     audio.ensureContext();
@@ -38,7 +43,11 @@
       btnUnlock.classList.add('active-toggle');
     }
   }
-  window.addEventListener('pointerdown', unlockAudioOnce, { once: true });
+  if (stageOnly) {
+    window.addEventListener('pointerdown', unlockAudioOnce, { once: true });
+    // Browser sources may permit autoplay; blocked browsers remain silent until user interaction.
+    try { unlockAudioOnce(); } catch (_) {}
+  }
 
   // 3. Vẽ các nén nhang đang cháy trong Lư Hương Đỉnh Đồng (x=540, y=895)
   const incenseHolder = document.getElementById('incenseSticksHolder');
@@ -107,13 +116,13 @@
     }).join('');
   }
 
-  // 5. Dựng Đạo Tràng 40 Phật Tử Quỳ Lễ Hai Bên Thảm Đỏ (5 Hàng x 4 Cột mỗi bên)
+  // 5. Hội trường 108 ghế 2D (9 hàng × 6 cột mỗi bên). 3D engine là công việc riêng.
   const congregationHall = document.getElementById('congregationHall');
   const HALL_SEAT_COORDS = [];
 
   (function buildHallGrid() {
-    const rows = 5;
-    const colsPerSide = 4;
+    const rows = 9;
+    const colsPerSide = 6;
     for (let r = 0; r < rows; r++) {
       const progress = r / (rows - 1); // 0 (xa) -> 1 (gần)
       const y = Math.round(1290 + progress * 355); // 1290 -> 1645
@@ -141,18 +150,16 @@
 
   let lastRenderedLeaderboardJson = '';
 
-  function renderCongregationHall(leaderboard = []) {
+  function renderCongregationHall(leaderboard = [], liveGuests = []) {
     if (!congregationHall) return;
     // Những người xếp từ hạng 7 trở đi ngồi ở các vị trí đầu tiên cạnh thảm đỏ
-    const hallViewers = leaderboard.slice(6);
-    const sig = JSON.stringify(hallViewers.map((d) => `${d.name}:${d.merit}`));
+    const hallViewers = [...leaderboard.slice(6), ...liveGuests.filter(g => !leaderboard.some(d => d.uniqueId === g.uniqueId))].slice(0, HALL_SEAT_COORDS.length);
+    const sig = JSON.stringify(hallViewers.map(d => `${d.uniqueId}:${d.name}:${d.avatar || ''}`));
     if (sig === lastRenderedLeaderboardJson && congregationHall.children.length > 0) return;
     lastRenderedLeaderboardJson = sig;
 
     // Ưu tiên gắn thẻ tên vào các ghế gần thảm đỏ dễ nhìn nhất
-    const labeledSeatIndices = [
-      3, 4, 11, 12, 19, 20, 27, 28, 35, 36, 2, 5, 10, 13, 18, 21, 26, 29
-    ];
+    const labeledSeatIndices = HALL_SEAT_COORDS.map((_, i) => i);
     const seatViewerMap = new Map();
     hallViewers.forEach((viewer, idx) => {
       if (idx < labeledSeatIndices.length) {
@@ -179,7 +186,7 @@
         <div
           class="hall-seat"
           data-seat-idx="${idx}"
-          style="left: ${seat.x}px; top: ${seat.y}px; z-index: ${20 + seat.row * 2}; transform: translate(-50%, -100%) scale(${seat.scale});"
+          style="left: ${seat.x}px; top: ${seat.y}px; z-index: ${20 + seat.row * 2}; transform: translate(-50%, -100%) scale(${Math.max(0.45, seat.scale * 0.72)});"
         >
           <img
             src="/assets/devotee.png"
@@ -360,7 +367,7 @@
 
     const lb = Array.isArray(st.leaderboard) ? st.leaderboard : [];
     renderVipCushions(lb);
-    renderCongregationHall(lb);
+    renderCongregationHall(lb, st.liveGuests || []);
 
     // Đồng bộ tên Chủ Lễ mặc định theo người dẫn đầu thực tế nếu chưa có sự kiện mới
     if (!hasInitializedRealLeader && lb.length > 0) {
@@ -375,17 +382,18 @@
       );
     }
 
-    // Cập nhật Bảng TẤM LÒNG THÀNH ở góc dưới phải (Top 4)
+    // Bảng TOP THÀNH TÂM theo 1 comment=1 điểm, 1 xu quà=10 điểm.
     const lbList = document.getElementById('leaderboardList');
     if (lbList) {
-      lbList.innerHTML = lb
-        .slice(0, 4)
+      const top = st.topSincere?.length ? st.topSincere : lb;
+      lbList.innerHTML = top
+        .slice(0, 10)
         .map(
           (item) => `
           <div class="leader-item">
             <span class="leader-rank">${item.rank}</span>
             <span class="leader-name">${escapeHtml(shortenName(item.name, 14))}</span>
-            <span class="leader-merit">${Number(item.merit).toLocaleString('vi-VN')}</span>
+            <span class="leader-merit">${Number(item.score ?? item.merit ?? 0).toLocaleString('vi-VN')}</span>
           </div>
         `
         )
@@ -472,7 +480,7 @@
     if (!ev) return;
 
     if (ev.ttsText && ev.type !== 'drawFortune') {
-      audio.enqueueTts(ev.ttsText, { voice: ev.ttsVoice || 'maichi' });
+      audio.enqueueTts(ev.ttsText, { voice: ev.ttsVoice || 'maichi', priority: ['offerGift', 'grandCeremony'].includes(ev.type) ? 100 : 0 });
     }
 
     switch (ev.type) {
@@ -509,6 +517,7 @@
       }
 
       case 'offerGift': {
+        spotlightGift();
         audio.playIncenseChime();
         audio.playTempleBell(0.85);
         particles.spawnIncenseBurst(540, 895);
@@ -518,6 +527,7 @@
       }
 
       case 'grandCeremony': {
+        spotlightGift();
         audio.playTempleBell(1.2);
         setTimeout(() => audio.playTempleBell(1.1), 900);
         particles.spawnGrandCeremonyRain();
@@ -610,6 +620,30 @@
     }, 6800);
   }
 
+  let spotlightTimer;
+  function spotlightGift() {
+    if (!stageOnly) return;
+    stage9x16.classList.add('live-gift-focus');
+    clearTimeout(spotlightTimer);
+    spotlightTimer = setTimeout(() => stage9x16.classList.remove('live-gift-focus'), 6500);
+  }
+
+  let rainEndTimer;
+  function startHeartRain(until) {
+    if (!stageOnly || !Number.isFinite(Number(until)) || Number(until) <= Date.now()) return;
+    let layer = document.getElementById('liveHeartRain');
+    if (!layer) {
+      layer = document.createElement('div');
+      layer.id = 'liveHeartRain';
+      layer.setAttribute('aria-hidden','true');
+      layer.innerHTML = Array.from({ length: 28 }, (_, i) => `<span style="--i:${i};--offset:${(i * 17) % 100}%">🪷</span>`).join('');
+      stage9x16.appendChild(layer);
+    }
+    layer.classList.add('active');
+    clearTimeout(rainEndTimer);
+    rainEndTimer = setTimeout(() => layer.classList.remove('active'), Math.max(0, Number(until) - Date.now()));
+  }
+
   // 8. Kết nối JSON-RPC 2.0 WebSocket & Gửi Lệnh RPC
   let ws = null;
   let rpcId = 1;
@@ -623,9 +657,15 @@
         const msg = JSON.parse(event.data);
         if (msg.method === 'temple.state') {
           updateUIState(msg.params);
+          syncChannelName(msg.params);
+          if (msg.params?.liveExperience?.rainUntil) startHeartRain(msg.params.liveExperience.rainUntil);
         } else if (msg.method === 'temple.event') {
           if (msg.params?.state) updateUIState(msg.params.state);
           if (msg.params?.event) triggerRitualVisuals(msg.params.event);
+        } else if (msg.method === 'temple.heartRain') {
+          startHeartRain(msg.params?.until);
+        } else if (msg.method === 'temple.speech') {
+          audio.enqueueTts(msg.params?.text || '', { priority: msg.params?.priority || 0 });
         } else if (msg.method === 'tts.play') {
           if (msg.params?.url) {
             audio.enqueueTts(msg.params.text || 'Nam mô A Di Đà Phật', {
@@ -644,7 +684,7 @@
   connectWebSocket();
 
   async function callRpc(method, params = {}) {
-    audio.ensureContext();
+    if (stageOnly) audio.ensureContext();
     const payload = {
       jsonrpc: '2.0',
       id: rpcId++,
@@ -761,6 +801,23 @@
       giftName: 'Đại Lễ Kim Long Chầu Phật',
       wish
     });
+  });
+
+  let didSetChannelName = false;
+  // Only prefill once: receiving state updates must not overwrite text while the host types.
+  function syncChannelName(st) {
+    if (didSetChannelName) return;
+    const v = st?.settings?.channelName;
+    const el = document.getElementById('inputChannelName');
+    if (v && el) { el.value = v; didSetChannelName = true; }
+  }
+  document.getElementById('btnSaveChannelName')?.addEventListener('click', () => {
+    const name = document.getElementById('inputChannelName')?.value.trim();
+    if (name) callRpc('temple.updateSettings', { channelName: name });
+  });
+  document.getElementById('btnReadNow')?.addEventListener('click', () => {
+    const text = document.getElementById('inputReadNow')?.value.trim();
+    if (text) callRpc('temple.speak', { text, broadcast: true });
   });
 
   document.getElementById('btnConnectTikTok')?.addEventListener('click', () => {
