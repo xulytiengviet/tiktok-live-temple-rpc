@@ -309,27 +309,25 @@ class TempleAudioEngine {
       return;
     }
 
-    if (this.ttsQueue.length >= 6) {
-      const dropped = this.ttsQueue.shift();
-      if (dropped?.onStart) dropped.onStart();
-      if (dropped?.onEnd) dropped.onEnd();
-    }
-
     const item = {
       id: `tts_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       text: clean,
       voice: (options.voice || this.ttsVoice || 'maichi').toLowerCase(),
       url: options.url || null,
+      priority: Number(options.priority) || 0,
       onStart,
       onEnd,
       fetchPromise: null
     };
 
-    if (!item.url) {
-      item.fetchPromise = this.fetchZeroTtsAudio(item.text, item.voice);
+    // Never prefetch all queued sentences at once: a LIVE spike can exhaust Python/RAM.
+    if (this.ttsQueue.length >= 32) {
+      const lowest = this.ttsQueue.reduce((best, x, i, arr) => x.priority < arr[best].priority ? i : best, 0);
+      if (this.ttsQueue[lowest].priority > item.priority) return;
+      this.ttsQueue.splice(lowest, 1);
     }
-
     this.ttsQueue.push(item);
+    this.ttsQueue.sort((a, b) => b.priority - a.priority);
     this.processTtsQueue();
   }
 
@@ -357,11 +355,9 @@ class TempleAudioEngine {
 
     try {
       let audioUrl = item.url;
-      if (!audioUrl && item.fetchPromise) {
-        const res = await item.fetchPromise;
-        if (res && res.ok && res.url) {
-          audioUrl = res.url;
-        }
+      if (!audioUrl) {
+        const res = await this.fetchZeroTtsAudio(item.text, item.voice);
+        if (res && res.ok && res.url) audioUrl = res.url;
       }
 
       if (audioUrl) {
@@ -373,8 +369,10 @@ class TempleAudioEngine {
         await this.playWavUrl(audioUrl);
         if (item.onEnd) item.onEnd();
       } else {
+        this.setBgDucking(true);
         if (item.onStart) item.onStart();
-        if (item.onEnd) setTimeout(item.onEnd, 5500);
+        await this.speakBrowser(item.text);
+        if (item.onEnd) item.onEnd();
       }
     } catch (err) {
       console.warn('[ZeroTTS Playback Warning]', err);
@@ -391,6 +389,24 @@ class TempleAudioEngine {
         setTimeout(() => this.processTtsQueue(), 250);
       }
     }
+  }
+
+  speakBrowser(text) {
+    return new Promise((resolve) => {
+      if (!('speechSynthesis' in window) || !window.SpeechSynthesisUtterance) return resolve(false);
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = 'vi-VN';
+      utterance.rate = 0.92;
+      utterance.volume = this.ttsVolume;
+      const voice = speechSynthesis.getVoices().find(v => v.lang.toLowerCase().startsWith('vi'));
+      if (voice) utterance.voice = voice;
+      let done = false;
+      const finish = () => { if (done) return; done = true; clearTimeout(timeout); resolve(true); };
+      const timeout = setTimeout(() => { try { speechSynthesis.cancel(); } catch (_) {} finish(); }, 20000);
+      utterance.onend = finish;
+      utterance.onerror = finish;
+      try { speechSynthesis.speak(utterance); } catch (_) { finish(); }
+    });
   }
 
   playWavUrl(url) {
