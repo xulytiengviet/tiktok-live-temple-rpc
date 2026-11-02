@@ -326,9 +326,10 @@ function saveState() {
       devotees: state.devotees,
       settings: state.settings
     };
-    fs.promises.writeFile(STATE_FILE, JSON.stringify(toSave, null, 2), 'utf8').catch((e) => {
-      console.error('[State] Lỗi lưu file:', e.message);
-    });
+    const tmp = STATE_FILE + '.tmp';
+    fs.promises.writeFile(tmp, JSON.stringify(toSave, null, 2), 'utf8')
+      .then(() => fs.promises.rename(tmp, STATE_FILE))
+      .catch((e) => console.error('[State] Lỗi ghi dữ liệu:', e.message));
   }, 1200);
 }
 
@@ -722,6 +723,9 @@ let liveGeneration = 0;
 let retryCount = 0;
 let stopLive = true;
 const offeringCooldowns = new Map();
+let pendingVisualLikes = 0;
+let pendingVisualLiker = null;
+let visualLikesTimer = null;
 const pendingGreetings = [];
 let guestUpdateTimer = null;
 let lastIdleGreeting = 0;
@@ -797,6 +801,7 @@ function parseViewerComment(commentText, user, uniqueId, avatar) {
   const cleanUser = sanitizeUserName(user);
   const lower = cleanWish.toLowerCase();
   liveOps.addScore({ user: cleanUser, uniqueId, avatar, comments: 1 });
+  refreshGuestsSoon();
   if (/^a\s*di\s*da\s*phat[.!]?$/i.test(lower) || /^adidaphat[.!]?$/i.test(lower)) {
     const key = uniqueId || cleanUser;
     const prev = offeringCooldowns.get(key) || 0;
@@ -922,6 +927,9 @@ async function connectTikTokLive(usernameOrUrl, { automatic = false } = {}) {
   reconnectTimer = null;
   const generation = ++liveGeneration;
   giftComboTracker.clear();
+  pendingVisualLikes = 0;
+  clearTimeout(visualLikesTimer);
+  visualLikesTimer = null;
 
   if (tiktokConn) {
     try {
@@ -1014,10 +1022,19 @@ async function connectTikTokLive(usernameOrUrl, { automatic = false } = {}) {
   conn.on(WebcastEvent.LIKE, (data) => {
     if (!isActive()) return;
     const { user, uniqueId, avatar } = extractUserFromEvent(data);
-    const likeCount = Math.min(2000, Math.max(1, Number(data?.count ?? data?.likeCount ?? 1)));
+    const likeCount = Math.min(2000, Math.max(1, Math.floor(Number(data?.count ?? data?.likeCount ?? 1)) || 1));
     const newRain = liveOps.addLikes(likeCount);
-    // SFX has a visual upper bound while all hearts still contribute to the 666 meter.
-    Rituals.strikeWoodenFish({ user, uniqueId, avatar, count: Math.min(likeCount, 15) });
+    pendingVisualLikes = Math.min(50, pendingVisualLikes + likeCount);
+    pendingVisualLiker = { user, uniqueId, avatar };
+    // Burst coalescing: all hearts are counted, but render at most one scene event / 400ms.
+    if (!visualLikesTimer) visualLikesTimer = setTimeout(() => {
+      visualLikesTimer = null;
+      if (!stopLive && pendingVisualLiker && pendingVisualLikes > 0) {
+        Rituals.strikeWoodenFish({ ...pendingVisualLiker, count: pendingVisualLikes });
+      }
+      pendingVisualLikes = 0;
+      pendingVisualLiker = null;
+    }, 400);
     if (newRain) broadcastNotification('temple.heartRain', { until: liveOps.rainUntil, durationMs: 60000 });
   });
 
@@ -1109,6 +1126,9 @@ function disconnectTikTokLive() {
   reconnectTimer = null;
   retryCount = 0;
   giftComboTracker.clear();
+  clearTimeout(visualLikesTimer);
+  visualLikesTimer = null;
+  pendingVisualLikes = 0;
   if (tiktokConn) {
     try {
       tiktokConn.disconnect();
@@ -1362,7 +1382,7 @@ setInterval(() => {
 wss.on('connection', ws => { ws.isAlive = true; ws.on('pong', () => { ws.isAlive = true; }); });
 
 const BIND_HOST = process.env.HOST || (process.env.LOCAL_DEV_UNSAFE === '1' ? '127.0.0.1' : '0.0.0.0');
-server.on('error', err => { console.error('[Server]', err.message); process.exitCode = 1; });
+server.on('error', err => { console.error('[Server]', err.message); process.exit(1); });
 server.listen(PORT, BIND_HOST, () => {
   console.log(`============================================================`);
   console.log(`🪷 CHÙA ONLINE TIKTOK LIVE RPC ĐÃ KHỞI ĐỘNG`);
