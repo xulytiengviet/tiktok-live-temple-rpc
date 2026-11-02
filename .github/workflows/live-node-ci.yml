@@ -25,3 +25,14 @@ jobs:
           node --check public/js/browser-login.js
       - name: Run LIVE behavior and burst-load unit tests
         run: node --test tests/*.test.js
+  windows-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install dependencies exactly as BAT-LIVE does
+        run: npm ci --no-audit --no-fund
+      - name: Boot Node server with only the required Node LTS runtime
+        run: node scripts/smoke-start.js
