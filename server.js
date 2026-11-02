@@ -984,7 +984,7 @@ async function connectTikTokLive(usernameOrUrl, { automatic = false } = {}) {
     if (!state.tiktok.connected) scheduleLiveReconnect(cleanUser);
   });
 
-  conn.on(WebcastEvent.STREAM_END, () => {
+  if (WebcastEvent.STREAM_END) conn.on(WebcastEvent.STREAM_END, () => {
     if (!isActive()) return;
     stopLive = true;
     clearTimeout(reconnectTimer);
