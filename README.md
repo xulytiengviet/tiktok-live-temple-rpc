@@ -1,6 +1,42 @@
-# 🪷 Chùa Linh Ứng Online — TikTok Live RPC (9:16 Interactive Buddhist Sanctuary)
+# 🪷 Đi Chùa Online — TikTok LIVE Temple RPC
 
-Hệ thống phát trực tiếp tương tác (**Interactive TikTok Live Stream & JSON-RPC 2.0**) chuẩn khung dọc **9:16 (`1080×1920`)** dành cho **OBS Studio / TikTok Live Studio**, chạy siêu nhẹ trên **Bun.js** và tích hợp giọng đọc AI tiếng Việt **ZeroTTS (`zeroweight-ai/ZeroTTS`)**.
+
+> **Không gian giải trí, thư giãn và chia sẻ lời chúc tốt đẹp; không đại diện cho cơ sở tôn giáo.** Quà TikTok chỉ là tương tác trong chương trình, không phải cúng dường, không đổi lấy may mắn hay kết quả nào. Mọi người cần tuân thủ quy định TikTok và luật hiện hành.
+
+## ⚡ Cài đặt Windows bằng 3 bước (khuyến nghị)
+
+**Bắt buộc:** cài [Node.js bản LTS](https://nodejs.org/) (22 trở lên, ưu tiên LTS đang được hỗ trợ), TikTok LIVE Studio và kết nối Internet. **Không bắt buộc cài Bun hoặc Python** để chạy phần hiển thị và kết nối LIVE. Nếu cần giọng đọc ZeroTTS chất lượng cao, cài riêng Python và bật \`ENABLE_ZEROTTS=1\`.
+
+1. Trên GitHub chọn **Code → Download ZIP**, giải nén.
+2. Bấm đúp **\`BAT-LIVE.bat\`**. Lần chạy đầu tự chạy \`npm ci\` theo \`package-lock.json\`. **Để cửa sổ BAT mở trong suốt buổi LIVE.**
+3. Trong TikTok LIVE Studio thêm nguồn **Link/Browser source** với \`http://127.0.0.1:3000/?view=stage\`, khung **1080 × 1920 (9:16)**. Nếu Studio không chấp nhận IP loopback, thử \`http://lvh.me:3000/?view=stage\` (cần DNS lvh.me trỏ về 127.0.0.1); không sử dụng tên miền này làm nguồn nếu DNS trả địa chỉ khác. Sau khi phát LIVE, tại \`http://127.0.0.1:3000/\` nhập \`@username\` để kết nối.
+
+**Một nguồn sân khấu duy nhất** được mở trong TikTok LIVE Studio. Trang điều khiển ở \`/\` sẽ im lặng. Đừng mở thêm một tab \`?view=stage\` đồng thời vì có thể phát trùng tiếng.
+
+**Chú ý:** \`BAT-LIVE.bat\` tự khởi động lại tiến trình Node.js nếu tiến trình lỗi, nhưng OBS/LIVE Studio, kết nối mạng, máy tính và TikTok vẫn có thể gặp sự cố; không có bảo đảm LIVE không bị ngắt. Thiết kế mặc định dùng sprite 2D tối ưu cho LIVE, **chưa sử dụng engine 3D FBX/Three.js của dự án tham khảo**.
+
+### Tính năng LIVE ổn định được tích hợp
+
+- \`adidaphat\` → nhân vật mang tên/ảnh đại diện tiến lên thắp ba nén hương, lạy 3 lần; giới hạn tối đa một lần/phút mỗi tài khoản.
+- Sự kiện quà → ưu tiên đọc tên và cảm ơn, bật ánh sáng tập trung vào người dâng quà. **Đây là hiệu ứng 2D, không phải máy quay 3D.**
+- Hội trường **108 vị trí 2D** có thể gắn ảnh đại diện, với giới hạn bộ nhớ người xem; bảng **TOP THÀNH TÂM** tính 1 điểm/comment, 10 điểm/xu quà (theo dữ liệu sự kiện nhận được).
+- Mỗi **666 tim** kích hoạt hoa sen rơi trong 60 giây; lần thả tim quá nhiều được giới hạn mỗi sự kiện để tránh mất khung hình.
+- Phân loại lời chúc theo thi cử, sức khỏe, tình duyên, gia đình và công việc; chào người mới qua hàng đợi theo nhóm; tự gửi lời chúc khi im lặng khoảng 90 giây.
+- Hộp **Tên kênh** và **Đọc ngay** ở bảng điều khiển; lệnh đọc được xếp vào hàng đợi giọng đọc ưu tiên sau câu đang phát.
+- Tự kết nối lại TikTok với exponential backoff tối đa ~60 giây khi mất kết nối; dừng thử lại khi TikTok báo \`STREAM_END\` hoặc người điều hành chủ động ngắt.
+- Bảo vệ hàng đợi giọng đọc, giới hạn bộ nhớ khách, luồng WebSocket; có \`GET /healthz\` để kiểm tra server.
+
+### Giọng đọc: Node.js LTS không cần Python
+
+Tính năng **giọng nói trình duyệt (SpeechSynthesis)** chạy dự phòng khi ZeroTTS không khả dụng; chất lượng giọng tiếng Việt tùy thuộc hệ điều hành và TikTok LIVE Studio. **Phải kiểm tra tiếng trên máy thật trước khi phát**, vì một số trình duyệt nguồn chặn autoplay hoặc không có giọng \`vi-VN\`. Khi muốn sử dụng ZeroTTS, cài \`zerotts\` theo hướng dẫn cũ và đặt \`ENABLE_ZEROTTS=1\` trước khi khởi động Node.
+
+### Nguồn tham khảo và bản quyền
+
+Tham khảo cơ chế vận hành của [workaipvlinh-byte/di-chua-online](https://github.com/workaipvlinh-byte/di-chua-online) (mã nguồn MIT). **Không đưa tài nguyên FBX, nền 4K và audio của dự án tham khảo vào repo này**: license MIT của bên tham khảo loại trừ thư mục \`public/assets\`; chỉ dùng lại khi có giấy phép phù hợp. Không tuyên bố hiệu ứng 2D hiện tại là 3D.
+
+---
+
+Hệ thống phát trực tiếp tương tác (**Interactive TikTok Live Stream & JSON-RPC 2.0**) chuẩn khung dọc **9:16 (`1080×1920`)** dành cho **OBS Studio / TikTok Live Studio**, chạy bằng **Node.js LTS** (Windows), dùng giọng đọc trình duyệt mặc định và cho phép bật **ZeroTTS** tùy chọn khi đã cài Python.
 
 Người xem trên TikTok Live tương tác trực tiếp qua **Bình luận (Comment)**, **Thả tim (Like)**, **Chia sẻ / Follow** và **Tặng quà (Gift)** để thực hiện các nghi thức tâm linh trên màn hình Chánh Điện **Đức Phật A Di Đà**:
 - 🔥 **Thắp hương & Đảnh lễ Tam Bái (8-Frame Walking & Prostration)**: Nhân vật Phật tử mặc áo lam bước đi từng bước dọc thảm đỏ hoa sen lên trước Lư Hương Đỉnh Đồng, hạ gối quỳ và thực hiện 3 lạy Ngũ thể đầu địa hướng về Đức Phật A Di Đà.
@@ -43,16 +79,16 @@ Người xem trên TikTok Live tương tác trực tiếp qua **Bình luận (Co
 
 ---
 
-## 🚀 Hướng Dẫn Cài Đặt & Chạy Nhanh
+## 🚀 Hướng Dẫn Cài Đặt Nâng Cao
 
 ### 1. Yêu cầu hệ thống
-- [Bun.js](https://bun.sh/) (`>= 1.1`)
-- Python `3.10+` & [`uv`](https://github.com/astral-sh/uv) (để tạo môi trường `.venv` chạy `zerotts`)
+- **Node.js LTS 22+** và npm (bắt buộc cho lối cài Windows)
+- Python `3.10+`, `uv`, `zerotts` (tùy chọn để bật ZeroTTS riêng)
 
 ### 2. Cài đặt thư viện
 ```bash
 # Cài đặt dependencies cho Bun / Node
-bun install
+npm ci
 
 # Tạo môi trường Python .venv và cài đặt ZeroTTS
 uv venv .venv
@@ -61,9 +97,9 @@ uv pip install --python .venv/bin/python zerotts pillow
 
 ### 3. Khởi chạy Server
 ```bash
-bun start
+npm start
 # Hoặc chế độ tự động reload khi sửa code:
-bun run dev
+npm run dev
 ```
 
 Mặc định server chạy tại cổng `3000`:
