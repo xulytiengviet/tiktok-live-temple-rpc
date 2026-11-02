@@ -10,6 +10,7 @@ class LiveOps {
     this.maxScores = maxScores;
     this.now = now;
     this.guests = new Map();
+    this.guestSequence = 0;
     this.scores = new Map();
     this.greeted = new Map();
     this.lastActivity = now();
@@ -26,7 +27,7 @@ class LiveOps {
     const time = this.now();
     const previous = this.guests.get(key);
     if (previous) this.guests.delete(key);
-    this.guests.set(key, { name: user, uniqueId: key, avatar: avatar || '', lastSeen: time });
+    this.guests.set(key, { name: user, uniqueId: key, avatar: avatar || '', lastSeen: time, sequence: ++this.guestSequence });
     while (this.guests.size > this.maxGuests) this.guests.delete(this.guests.keys().next().value);
     this.touch();
     // Greet at most once per user in this server session, even when seat is recycled.
@@ -79,7 +80,7 @@ class LiveOps {
   }
 
   getGuests() {
-    return [...this.guests.values()].sort((a, b) => b.lastSeen - a.lastSeen);
+    return [...this.guests.values()].sort((a, b) => (b.lastSeen - a.lastSeen) || (b.sequence - a.sequence));
   }
 
   getTop(limit = 10) {
